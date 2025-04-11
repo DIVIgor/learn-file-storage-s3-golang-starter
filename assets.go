@@ -35,7 +35,7 @@ func getAssetFullName(contentType string) string {
 	thumbnailID := base64.RawURLEncoding.EncodeToString(base)
 
 	ext := getContentTypeExt(contentType)
-	return fmt.Sprintf("%s%s", &thumbnailID, ext)
+	return fmt.Sprintf("%s%s", thumbnailID, ext)
 }
 
 // get asset's path on disk
