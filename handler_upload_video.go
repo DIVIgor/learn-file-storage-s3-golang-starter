@@ -1,16 +1,70 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
 )
+
+// Check video at file path and return its aspect ratio
+func getVideoAspectRatio(filePath string) (aspectRatio string, err error) {
+	command := exec.Command(
+		"ffprobe", "-v", "error",
+		"-print_format", "json", "-show_streams",
+		filePath,
+	)
+
+	var buffer bytes.Buffer
+	command.Stdout = &buffer
+
+	err = command.Run()
+	if err != nil {
+		return aspectRatio, fmt.Errorf("ffprobe error: %v", err)
+	}
+
+	var videoDetails struct {
+		Streams []struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		} `json:"streams"`
+	}
+
+	err = json.Unmarshal(buffer.Bytes(), &videoDetails)
+	if err != nil {
+		return aspectRatio, fmt.Errorf("couldn't parse ffprobe output: %v", err)
+	}
+
+	if len(videoDetails.Streams) == 0 {
+		return aspectRatio, errors.New("no video streams found")
+	}
+
+	// aspect ratios we're interested in
+	horizontalVid := 16.0 / 9.0
+	verticalVid := 9.0 / 16.0
+	maxDifference := 0.1
+	// check if aspect ratio is within +/- `maxDifference` of specified standards
+	aspectRatioFloat := float64(videoDetails.Streams[0].Width) / float64(videoDetails.Streams[0].Height)
+	if aspectRatioFloat < horizontalVid+maxDifference && aspectRatioFloat > horizontalVid-maxDifference {
+		aspectRatio = "16:9"
+	} else if aspectRatioFloat < verticalVid+maxDifference && aspectRatioFloat > verticalVid-maxDifference {
+		aspectRatio = "9:16"
+	} else {
+		aspectRatio = "other"
+	}
+
+	return aspectRatio, err
+}
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	// 1. Set an upload limit of 1 GB (1 << 30 bytes) using http.MaxBytesReader.
@@ -99,6 +153,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't read video size", err)
+		return
+	}
+
+	var directory string
+	switch aspectRatio {
+	case "16:9":
+		directory = "landscape"
+	case "9:16":
+		directory = "portrait"
+	default:
+		directory = "other"
+	}
+
 	// Put the object into S3 using PutObject. You'll need to provide:
 	// The bucket name
 	// The file key. Use the same <random-32-byte-hex>.ext format as the key.
@@ -106,6 +176,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	// The file contents (body). The temp file is an os.File which implements io.Reader
 	// Content type, which is the MIME type of the file.
 	fileKey := getAssetFullName(contentType)
+	fileKey = filepath.Join(directory, fileKey) // combine directory with file name for S3
 	bucketInput := s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &fileKey,
