@@ -49,15 +49,12 @@ func getVideoAspectRatio(filePath string) (aspectRatio string, err error) {
 		return aspectRatio, errors.New("no video streams found")
 	}
 
-	// aspect ratios we're interested in
-	horizontalVid := 16.0 / 9.0
-	verticalVid := 9.0 / 16.0
-	maxDifference := 0.1
-	// check if aspect ratio is within +/- `maxDifference` of specified standards
-	aspectRatioFloat := float64(videoDetails.Streams[0].Width) / float64(videoDetails.Streams[0].Height)
-	if aspectRatioFloat < horizontalVid+maxDifference && aspectRatioFloat > horizontalVid-maxDifference {
+	// check if aspect ratio is within the specified standards
+	height := videoDetails.Streams[0].Height
+	width := videoDetails.Streams[0].Width
+	if width == height*16/9 {
 		aspectRatio = "16:9"
-	} else if aspectRatioFloat < verticalVid+maxDifference && aspectRatioFloat > verticalVid-maxDifference {
+	} else if height == width*16/9 {
 		aspectRatio = "9:16"
 	} else {
 		aspectRatio = "other"
