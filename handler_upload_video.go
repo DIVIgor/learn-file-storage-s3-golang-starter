@@ -20,9 +20,10 @@ import (
 // Check video at file path and return its aspect ratio
 func getVideoAspectRatio(filePath string) (aspectRatio string, err error) {
 	command := exec.Command(
-		"ffprobe", "-v", "error",
-		"-print_format", "json", "-show_streams",
-		filePath,
+		"ffprobe",
+		"-v", "error",
+		"-print_format", "json",
+		"-show_streams", filePath,
 	)
 
 	var buffer bytes.Buffer
@@ -61,6 +62,35 @@ func getVideoAspectRatio(filePath string) (aspectRatio string, err error) {
 	}
 
 	return aspectRatio, err
+}
+
+// Move moov atom (video meta) to the start for the video at filePath and
+// return path to a modified version
+func processVideoForFastStart(filePath string) (processedFilePath string, err error) {
+	processedFilePath = filePath + ".processing"
+
+	command := exec.Command(
+		"ffmpeg",
+		"-i", filePath,
+		"-c", "copy",
+		"-movflags", "faststart",
+		"-f", "mp4", processedFilePath,
+	)
+
+	err = command.Run()
+	if err != nil {
+		return "", fmt.Errorf("ffmpeg error: %v", err)
+	}
+
+	fileInfo, err := os.Stat(processedFilePath)
+	if err != nil {
+		return "", fmt.Errorf("couldn't get file stats: %v", err)
+	}
+	if fileInfo.Size() == 0 {
+		return "", fmt.Errorf("processed file is empty")
+	}
+
+	return processedFilePath, err
 }
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
@@ -150,6 +180,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// calculate aspect ratio and pick a directory name for S3
 	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't read video size", err)
@@ -166,6 +197,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		directory = "other"
 	}
 
+	// move moov atom to the start of the video
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't move moov atom to the start", err)
+		return
+	}
+	defer os.Remove(processedFilePath)
+
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't open processed file", err)
+		return
+	}
+	// defer close the temp file (defer is LIFO, so it will close before the remove)
+	defer processedFile.Close()
+
 	// Put the object into S3 using PutObject. You'll need to provide:
 	// The bucket name
 	// The file key. Use the same <random-32-byte-hex>.ext format as the key.
@@ -177,7 +224,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	bucketInput := s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &fileKey,
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: &contentType,
 	}
 	_, err = cfg.s3Client.PutObject(r.Context(), &bucketInput)
