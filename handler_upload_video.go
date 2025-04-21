@@ -2,18 +2,23 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -91,6 +96,44 @@ func processVideoForFastStart(filePath string) (processedFilePath string, err er
 	}
 
 	return processedFilePath, err
+}
+
+// Create presign client, make a presigned request and return its URL
+func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (presignedURL string, err error) {
+	presignClient := s3.NewPresignClient(s3Client)
+
+	presignedReq, err := presignClient.PresignGetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+	}, s3.WithPresignExpires(expireTime))
+	if err != nil {
+		return presignedURL, fmt.Errorf("failed to generate presigned URL: %v", err)
+	}
+
+	return presignedReq.URL, err
+}
+
+// modify and return a video meta with presigned URL
+func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (videoMeta database.Video, err error) {
+	videoMeta = video
+	if videoMeta.VideoURL == nil {
+		log.Println("Video URL is empty")
+		return videoMeta, nil
+	}
+	urlParts := strings.Split(*video.VideoURL, ",")
+	if len(urlParts) < 2 {
+		log.Printf("Not enough values in video URL: %v", *videoMeta.VideoURL)
+		return videoMeta, nil
+	}
+
+	presignedURL, err := generatePresignedURL(cfg.s3Client, urlParts[0], urlParts[1], 5*time.Minute)
+	if err != nil {
+		return videoMeta, err
+	}
+
+	videoMeta.VideoURL = &presignedURL
+
+	return videoMeta, err
 }
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
@@ -236,11 +279,19 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	// Update the VideoURL of the video record in the database with the S3 bucket and key.
 	// S3 URLs are in the format https://<bucket-name>.s3.<region>.amazonaws.com/<key>.
 	// Make sure you use the correct region and bucket name!
-	videoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, fileKey)
+	// videoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, fileKey)
+	videoURL := fmt.Sprintf("%s,%s", cfg.s3Bucket, fileKey)
 	videoMeta.VideoURL = &videoURL
 	err = cfg.db.UpdateVideo(videoMeta)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
+		return
+	}
+
+	// change meta with presigned URL
+	videoMeta, err = cfg.dbVideoToSignedVideo(videoMeta)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't generate presigned URL", err)
 		return
 	}
 
